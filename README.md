@@ -8,7 +8,90 @@ Real-time driver fatigue detection from a webcam feed, combining two independent
 Face and eye regions are located with OpenCV Haar cascades; both cues feed into a single
 rolling fatigue score, and an alarm sound fires once the score crosses a threshold.
 
-## Architecture
+| Model | Accuracy | Macro F1 | ROC-AUC | Drowsy-class recall |
+|---|---|---|---|---|
+| Eye (Open / Closed) | **98.6%** | 0.986 | 0.999 | 99.1% of closed eyes caught |
+| Mouth (yawn / no_yawn) | **89.7%** | 0.896 | 0.946 | 88.7% of yawns caught |
+
+## Quick start
+
+The trained models and alarm sound are committed, so no dataset or training is needed
+to run the app.
+
+**Requirements:** Python **3.10–3.12** (TensorFlow does not support newer versions yet)
+and a webcam. On macOS: `brew install python@3.12`.
+
+```bash
+git clone https://github.com/MujtabaF/driver-drowsiness-detection.git
+cd driver-drowsiness-detection
+./run.sh
+```
+
+The first run creates a `.venv` virtual environment and installs dependencies (a few
+minutes); every run after that starts straight away. Commands:
+
+| Command | What it does |
+|---|---|
+| `./run.sh` | Live webcam drowsiness detection |
+| `./run.sh evaluate` | Recompute metrics and charts into `results/` |
+
+A window opens with face/eye boxes, per-cue predictions with confidence are printed to
+the console, and a running fatigue score is shown. Once the score passes the threshold
+the frame gets a red border and the alarm plays. **Press `q` to quit.**
+
+<details>
+<summary>Manual setup (without <code>run.sh</code>)</summary>
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+python src/detect.py      # live detection
+python src/evaluate.py    # metrics + charts
+```
+
+</details>
+
+### Troubleshooting
+
+- **Black window / "Could not open webcam" (macOS)** — grant camera access to the app
+  you're running from (Terminal, iTerm, VS Code) in *System Settings → Privacy &
+  Security → Camera*, then restart that app.
+- **`module 'cv2' has no attribute 'CascadeClassifier'`** — OpenCV 5 removed Haar
+  cascades. `requirements.txt` pins `opencv-python<5`; reinstall with
+  `pip install -r requirements.txt`.
+- **`objc: Class SDL... is implemented in both ...` warnings** — OpenCV and pygame each
+  bundle SDL. Harmless noise; ignore it.
+- **`No matching distribution found for tensorflow`** — your Python is too new. Delete
+  `.venv` and recreate it with Python 3.12.
+
+## Results
+
+Evaluated on the validation split (218 eye images, 136 mouth crops) with
+`./run.sh evaluate`. Raw numbers are in [`results/metrics.json`](results/metrics.json).
+
+![Validation metrics by model](results/metrics_comparison.png)
+
+![Confusion matrices](results/confusion_matrices.png)
+
+![ROC curves](results/roc_curves.png)
+
+**Reading the results**
+
+- The **eye model** is near-perfect and balanced: 3 errors in 218 images (1 missed
+  closed eye, 2 false alarms).
+- The **mouth model** is the weaker cue: 7 missed yawns and 7 false alarms out of 136.
+  It also has less training data (826 vs 1,234 images), because face detection fails on
+  some of the source photos during mouth-crop preprocessing.
+- For an alarm, **recall on the drowsy class** matters most — a missed closed eye is
+  worse than an occasional false alarm. Live, the rolling fatigue score smooths out
+  single-frame mistakes, so the alarm is more robust than per-image numbers suggest.
+- **Caveat:** the validation split was also used by EarlyStopping/ModelCheckpoint to
+  pick the best epoch, so these figures are slightly optimistic, and live webcam
+  conditions (lighting, glasses, camera angle) differ from the Kaggle images.
+
+## How it works
 
 Two independent binary CNNs rather than one multi-class model, since eyes and mouth come
 from different face regions (different cascades) and are conceptually separate signals
@@ -24,11 +107,31 @@ The mouth-region crop is taken as the bottom third of the detected face bounding
 (`y + 2h/3` to `y + h`), rather than a separate mouth cascade — OpenCV doesn't ship a
 reliable one, and this keeps training and live inference using the exact same crop logic.
 
-## Setup
+**Fatigue score** (`src/detect.py`): each frame adds +1 if eyes are closed, else +2 if a
+yawn is detected, else −1, clamped to 0–30. The alarm fires above 15, so a single
+misclassified frame never triggers it — only sustained signs of drowsiness do.
 
-```bash
-pip install -r requirements.txt
+### Project layout
+
 ```
+├── run.sh                    # one-command launcher
+├── alarm.wav                 # alarm sound (regenerate with src/generate_alarm.py)
+├── models/                   # trained .keras models + class-index maps
+├── results/                  # metrics.json + evaluation charts
+├── src/
+│   ├── detect.py             # live webcam detection + alarm
+│   ├── evaluate.py           # accuracy / precision / recall / F1 / ROC-AUC
+│   ├── plot_metrics.py       # charts from results/metrics.json
+│   ├── preprocess_mouth.py   # crops mouth regions from full-face images
+│   ├── train_eye_model.py
+│   ├── train_mouth_model.py
+│   └── generate_alarm.py     # synthesizes alarm.wav
+└── understanding.md          # design decisions + debugging writeup
+```
+
+## Retraining from scratch (optional)
+
+Only needed to retrain the models or re-run evaluation; the dataset is not committed.
 
 ### 1. Dataset
 
@@ -51,41 +154,23 @@ unzip -j archive.zip 'dataset_new/test/no_yawn/*'  -d dataset/mouth/valid/no_yaw
 ```
 
 The `yawn`/`no_yawn` images are full face frames, not mouth crops, so they need
-preprocessing before training (crops the bottom-third-of-face mouth region using face
-detection, matching what happens at inference time):
+preprocessing (crops the bottom-third-of-face mouth region using face detection,
+matching what happens at inference time):
 
 ```bash
-python3 src/preprocess_mouth.py
+python src/preprocess_mouth.py
 ```
 
-### 2. Train both models
+### 2. Train, evaluate, run
 
 ```bash
-python3 src/train_eye_model.py
-python3 src/train_mouth_model.py
+python src/train_eye_model.py     # -> models/eye_model.keras + eye_classes.json
+python src/train_mouth_model.py   # -> models/mouth_model.keras + mouth_classes.json
+python src/evaluate.py            # -> results/metrics.json + charts
+python src/detect.py
 ```
 
-Saves `models/eye_model.keras` + `models/eye_classes.json` and
-`models/mouth_model.keras` + `models/mouth_classes.json`.
-
-### 3. Generate the alarm sound
-
-```bash
-python3 src/generate_alarm.py
-```
-
-Synthesizes `alarm.wav` (a two-tone alert) so the project has no external audio
-dependency.
-
-### 4. Run it
-
-```bash
-python3 src/detect.py
-```
-
-Opens a webcam window with live face/eye boxes, per-cue predictions with confidence
-printed to the console, a running fatigue score, and a red-border + alarm once the
-score passes threshold. Press `q` to quit.
+`python src/generate_alarm.py` re-synthesizes `alarm.wav` (a two-tone alert) if needed.
 
 ## Key engineering decisions (and bugs caught along the way)
 

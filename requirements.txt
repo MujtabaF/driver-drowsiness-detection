@@ -1,5 +1,6 @@
 tensorflow
-opencv-python
+opencv-python<5
 numpy
 pygame
 Pillow
+matplotlib
